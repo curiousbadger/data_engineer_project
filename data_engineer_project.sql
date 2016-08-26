@@ -475,6 +475,8 @@ adclick.g.doubleclick.net
 
 Or should they all get attributed to doubleclick.net? Hmmm.... I can see both 
 being very useful in different circumstances...
+
+TODO: Replace other special characters! %25
 ********************************************************************************/
 
 
@@ -493,7 +495,7 @@ where _ref_raw is not null
   select distinct _ref_raw
       --,sub_ref
       --Parse out the first thing that's NOT a forward slash after two of em (and a colon etc...)
-      ,substring(sub_ref from '.*://([^/]*)') as domain
+      ,substring(sub_ref from '.*://([^/%]*)') as domain
   from special_chars_filtered
 )
 , lvl2 as (
@@ -523,6 +525,7 @@ select distinct lvl2_domain from refdomain_map order by lvl2_domain;
 select * from refdomain_map limit 1000;
 select count(*) from refdomain_map;
 select * from refdomain_map where raw_ref like '%android%' limit 1000;
+
 /*--------------------------------------------------------------------------------
 END   refdomain_map
 --------------------------------------------------------------------------------*/
@@ -653,6 +656,20 @@ group by idgoal_raw;
 "1"      "52"
        "2070770"
 */
+
+-- To fix lvl2_domain when refdomain_map get's updated...
+-- THIS is why we normalize our data ;)
+select s._ref_raw, s.lvl2_domain, r.lvl2_domain
+from shard_clickstream_data_denorm s
+join refdomain_map r
+	on s._ref_raw=r._ref_raw
+where s.lvl2_domain!=r.lvl2_domain;
+
+update shard_clickstream_data_denorm as s
+	set lvl2_domain=r.lvl2_domain
+from refdomain_map as r
+where s._ref_raw=r._ref_raw
+	and s.lvl2_domain!=r.lvl2_domain;
 
 /*--------------------------------------------------------------------------------
 END   
