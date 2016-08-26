@@ -666,10 +666,15 @@ join refdomain_map r
 where s.lvl2_domain!=r.lvl2_domain;
 
 update shard_clickstream_data_denorm as s
-	set lvl2_domain=r.lvl2_domain
+set lvl2_domain=r.lvl2_domain
+	,"domain"=r."domain"
 from refdomain_map as r
 where s._ref_raw=r._ref_raw
-	and s.lvl2_domain!=r.lvl2_domain;
+	and (
+		s.lvl2_domain!=r.lvl2_domain
+		or s."domain"!=r."domain"
+	)
+;
 
 /*--------------------------------------------------------------------------------
 END   
