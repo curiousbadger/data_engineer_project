@@ -1,3 +1,6 @@
+/********************************************************************************
+BEGIN UTILITY FUNCTIONS
+********************************************************************************/
 -- A handy function...
 CREATE OR REPLACE FUNCTION isnumeric(text) RETURNS BOOLEAN AS $$
 DECLARE x NUMERIC;
@@ -14,6 +17,12 @@ LANGUAGE plpgsql IMMUTABLE;
 -- To play with that fun "data"
 create extension hstore;
 
+/*--------------------------------------------------------------------------------
+END   UTILITY FUNCTIONS
+--------------------------------------------------------------------------------*/
+/********************************************************************************
+BEGIN DATA IMPORT
+********************************************************************************/
 /*
 How many rows?
 >wc -l shard_clickstream_data_20160801.csv
@@ -53,9 +62,14 @@ from shard_clickstream_data_20160801
 limit 1000;
 select count(*) from click_sample;
 
+/*--------------------------------------------------------------------------------
+END   DATA IMPORT
+--------------------------------------------------------------------------------*/
 
-/*
-I actually was not familiar with the "hstore" datatype in PostgreSQL, though I can definitely see how it would be useful! Holy cow, you can even put indexes on there...
+/********************************************************************************
+BEGIN INVESTIGATION
+I actually was not familiar with the "hstore" datatype in PostgreSQL, though I can definitely see how it would be useful! 
+Holy cow, you can even put indexes on there...
 
 Let's poke around a bit with the columns you said were important...
 
@@ -63,7 +77,7 @@ Let's poke around a bit with the columns you said were important...
 "http_user_agent"=>"Mozilla/5.0 (Windows NT 6.0; rv:47.0) Gecko/20100101 Firefox/47.0" -- the user agent of the device that generate this event
 "http_referer"=>"https://www.johnstonmurphy.com/melton-cap-toe/2388.html" -- url the user visited
 "query_string" --This is a special key, it contains all the data that is captured and sent by the tracker
-*/
+********************************************************************************/
 -- Are you sneaking any keys by me?
 select distinct k
 into data_hstore_keys
@@ -119,11 +133,18 @@ uri                    6
 request_method         4
 */
 -- Why does the ip address field have values that long?
-select id, data->'http_x_forwarded_for' FROM shard_clickstream_data_20160801 where char_length(data->'http_x_forwarded_for')>16 limit 10;
-select id, data->'http_x_forwarded_for', DATA from shard_clickstream_data_20160801 where id=1383528665;
+select id, data->'http_x_forwarded_for' FROM shard_clickstream_data_20160801 
+where char_length(data->'http_x_forwarded_for')>16 limit 10;
+select id, data->'http_x_forwarded_for', DATA 
+from shard_clickstream_data_20160801 where id=1383528665;
 -- Aha! Can be multiple ips... tricky ;)
+/*--------------------------------------------------------------------------------
+END   INVESTIGATION
+--------------------------------------------------------------------------------*/
 
-/*
+/********************************************************************************
+BEGIN SPLIT HSTORE DATA
+
 Oh fun, query_string is another nested data set :)
 Let's break it into a temp table to make sure I don't miss something...
 For instance, do all the query_strings have the same keys?
@@ -132,10 +153,10 @@ For instance, do all the query_strings have the same keys?
 Not even close! 
 
 It will probably make our lives easier to build a big 'ole denormalized table
-that has all that "embedded" stuff extracted into simple fields (while ensureing 
+that has all that "embedded" stuff extracted into simple fields (while ensuring 
 that we maintain uniqueness on id). Let's first split the hstore stuff off into
 columns, then we can worry about what to do with query_string.
-*/
+********************************************************************************/
 
 CREATE TABLE shard_clickstream_data_split (
 	id INTEGER NOT NULL,
@@ -206,12 +227,16 @@ SELECT id,
   data->'query_string'  
 from shard_clickstream_data_20160801;
 
-select *
-shard_clickstream_data_20160801 s
 
-/*
+/*--------------------------------------------------------------------------------
+END   SPLIT HSTORE DATA
+--------------------------------------------------------------------------------*/
+/********************************************************************************
+BEGIN SPLIT QUERY_STRING
+
 Split the query_string into key-value pairs on ampersand.
-*/
+********************************************************************************/
+
 drop table if exists click_query_string;
 select id
 	,split_part(nv, '=', 1) as name
@@ -323,21 +348,25 @@ the aggregates.
 Data is never completely clean... :(
 */
 
+/*--------------------------------------------------------------------------------
+END   SPLIT QUERY_STRING
+--------------------------------------------------------------------------------*/
+/********************************************************************************
+BEGIN SITE_MAP
 
-/*
 Now, we need to start moving toward our "MEGA-Denormalized table", and to do
 that the main hurdle is pivoting those name-value pairs from click_query_string
 back in line with our ids in shard_clickstream_data_split.
 
 BUT... it would be nice if we could tie alot of what appear to be mangled 
-site_ids to their actual values. Let's make a map to reassociate them with the 
+site_ids to their actual values. Let's make a map to re-associate them with the 
 proper site_id so that our attribution is cleaner.
 
 I'm going to just guess at proper sanitation here, obviously in the real world
 I would need confirmation that these assumptions are correct. But I basically just
 pruned the %XX characters and the curly braces on {999934}. (Those are reasonable
 assumptions, no?)
-*/
+********************************************************************************/
 
 --drop table if exists site_map;
 SELECT distinct
@@ -351,6 +380,7 @@ ALTER TABLE site_map
 ADD CONSTRAINT pk_site_map PRIMARY KEY (raw_site_id);
 CREATE INDEX ix_site_map
 ON site_map(site_id);
+
 --Manual editing magic... here's what I changed:
 select *
 from site_map
@@ -365,10 +395,14 @@ raw_site_id                   site_id
 {999934}                      999934
 */
 
+/*--------------------------------------------------------------------------------
+END   SITE_MAP
+--------------------------------------------------------------------------------*/
 /********************************************************************************
 BEGIN click_query_pivot
+
+Let's pivot those query_string columns back around for the fields we're interested in...
 ********************************************************************************/
--- Let's pivot those query_string columns back around for the fields we're interested in...
 
 drop table if exists click_query_pivot;
 select c.id
@@ -441,29 +475,26 @@ adclick.g.doubleclick.net
 
 Or should they all get attributed to doubleclick.net? Hmmm.... I can see both 
 being very useful in different circumstances...
-
-TODO: Do not use lvl2_domain for IP addresses.
-TODO: How to handle things like website.co.uk?
 ********************************************************************************/
 
 
 drop table if exists refdomain_map;
 ;with special_chars_filtered as (
-	select distinct
-		 _ref_raw
-		-- Replace all those crazy %XX with colons and slashes :)
-		,replace(
-			replace(_ref_raw,'%2F','/')
-			,'%3A',':') as sub_ref
-	from click_query_pivot
-	where _ref_raw is not null
- )
+  select distinct
+	 _ref_raw
+	-- Replace all those crazy %XX with colons and slashes :)
+	,replace(
+		replace(_ref_raw,'%2F','/')
+		,'%3A',':') as sub_ref
+  from click_query_pivot
+where _ref_raw is not null
+)
 ,domain_parsed as (
   select distinct _ref_raw
       --,sub_ref
       --Parse out the first thing that's NOT a forward slash after two of em (and a colon etc...)
       ,substring(sub_ref from '.*://([^/]*)') as domain
-	from special_chars_filtered
+  from special_chars_filtered
 )
 , lvl2 as (
   select _ref_raw
@@ -475,8 +506,8 @@ drop table if exists refdomain_map;
 )
 select
    _ref_raw
-  --HACK: Only use lvl2_domain if:
   ,"domain"
+  --HACK: Only use lvl2_domain if:
   ,case when "domain" ~ '[[:alpha:]]' --It contains a letter
   	and lvl2_domain !~ '^com\..*' --Not one of those funky com.uk or co.tk or whaterver...
   	and lvl2_domain !~ '^co\..*'
@@ -495,9 +526,11 @@ select * from refdomain_map where raw_ref like '%android%' limit 1000;
 /*--------------------------------------------------------------------------------
 END   refdomain_map
 --------------------------------------------------------------------------------*/
-
 /********************************************************************************
 BEGIN shard_clickstream_data_denorm
+
+Now we can finally build our "MEGA-Denormalized" table!
+(Shhh... don't tell Ronald Fagin...)
 ********************************************************************************/
 
 --drop table if exists shard_clickstream_data_denorm;
@@ -545,7 +578,11 @@ left join refdomain_map dm
 	on c._ref_raw=dm._ref_raw;
 ALTER TABLE shard_clickstream_data_denorm
 ADD CONSTRAINT pk_shard_clickstream_data_denorm PRIMARY KEY (id);
-
+/*
+TODO: Some of these indices are unnecessary, and we could maybe
+use some others on site_id, timestamp and site_id, visitor_id, timestamp
+for the first/last and average time queries below?
+*/
 CREATE INDEX ix_shard_clickstream_data_denorm_site_id
 ON shard_clickstream_data_denorm(site_id);
 CREATE INDEX ix_shard_clickstream_data_denorm_timestamp
@@ -574,7 +611,7 @@ from shard_clickstream_data_denorm
 where ec_id_raw is not null;
 
 
---is there an identical ec_id_raw that has multiple revenues?
+-- Is there an identical ec_id_raw that has multiple revenues?
 -- I don't think there are any concerning dupes...
 ;with ec_id_inv as (
   select
@@ -605,7 +642,8 @@ join shard_clickstream_data_denorm d
 on e.ec_id_raw=d.ec_id_raw
 order by d.ec_id_raw, d.revenue_raw;
 
--- I hope it's correct to assume that ANY non-NULL ec_id value indicates a conversion, and not ec_id=1...
+-- TODO: I hope it's correct to assume that ANY non-NULL ec_id value 
+-- indicates a conversion, and not ec_id=1...
 select idgoal_raw,count(*)
 from shard_clickstream_data_denorm
 group by idgoal_raw;
@@ -622,6 +660,7 @@ END
 
 /********************************************************************************
 BEGIN ec_conversion
+
 Build a list of unique "conversion" events associated with revenue.
 
 I may be way off the mark here, but my assumption is that each ec_id represents
@@ -686,6 +725,7 @@ END   ec_conversion
 
 /********************************************************************************
 BEGIN site_revenue_report
+
 Ex 1.A and Ex 1.C
 Show revenue sums by site, even for ones that didn't have entries.
 Some people would have wrapped coalesce(revenue_sum, 0) etc... around the
@@ -754,8 +794,13 @@ END   site_revenue_report
 --------------------------------------------------------------------------------*/
 /********************************************************************************
 BEGIN domain_revenue_report
+
 Ex 1.B
-Show revenue by the first referral domain.
+Show revenue by the first referral domain, then again using only the first two 
+sub-domains of the referral domain (clear as mud?).
+Ex:
+google.com 		--> 	google.com
+www.google.com 	--> 	google.com
 ********************************************************************************/
 
 drop table if exists domain_revenue_report;
@@ -809,10 +854,6 @@ select *
 from lvl2_domain_revenue_report
 order by total_conversions;
 
-/*--------------------------------------------------------------------------------
-END   domain_revenue_report
---------------------------------------------------------------------------------*/
-
 
 /*
 Unfortunately it looks like alot of this money is going unattributed due to the
@@ -835,10 +876,15 @@ where id in (
 	and name like '%ref%'
 ;
 
+/*--------------------------------------------------------------------------------
+END   domain_revenue_report
+--------------------------------------------------------------------------------*/
 /********************************************************************************
 BEGIN FIRST/LAST VISITOR INFO
+
 Get first/last visitor by site and calculate the timespan
 ********************************************************************************/
+
 drop table if exists site_visitor_timespan;
 ;with site_first_visitor as (
   select distinct on (site_id)
@@ -911,15 +957,15 @@ site_id         seconds_span   first_visitor      min_ts   
 999997          86203          587c938fe3cf47dc   8/1/2016 12:00:28 AM   890c45d43c5cf9da   8/1/2016 11:57:11 PM
 undefined       80763          c840312871c902bf   8/1/2016 1:20:11 AM    c840312871c902bf   8/1/2016 11:46:14 PM
 */
+
 /*--------------------------------------------------------------------------------
 END   FIRST/LAST VISITOR INFO
 --------------------------------------------------------------------------------*/
-
 /********************************************************************************
 BEGIN FIRST/LAST CONVERSION VISITOR INFO
+
 Similar to above, but only get info where conversions occurred.
 TODO: Is idgoal_raw necessary, or does ec_id_raw alone indicate a conversion?
-
 ********************************************************************************/
 drop table if exists site_converted_visitor;
 ;with site_first_visitor as (
@@ -966,13 +1012,11 @@ select * from site_converted_visitor;
 /*--------------------------------------------------------------------------------
 END   FIRST/LAST CONVERSION VISITOR INFO
 --------------------------------------------------------------------------------*/
-
 /********************************************************************************
 BEGIN SITE AGGREGATES
 ********************************************************************************/
-/*
-Get some basic counts by site_id...
-*/
+
+-- Get some basic counts by site_id...
 drop table if exists site_visitors;
 select
 	 COALESCE(site_id, 'UNKNOWN') as site_id
@@ -993,12 +1037,12 @@ select * from site_visitors where site_id='UNKNOWN' limit 1000;
 
 /*
 Calculate visitors/hour
-If we haven't actually sampled longer than 1 hour, it seems unfair to extrapolate
-on the fractional span?
+If we haven't actually sampled longer than 1 hour, it seems unfair to
+extrapolate on the fractional span?
 
 Since timestamp for this dataset appears to be over the course of 1 day,
-2 people coming over the course of 10 minutes does not seem to imply 12 visitors/hour
-(at least to me).
+2 people coming over the course of 10 minutes does not seem to imply 12 
+visitors/hour (at least to me).
 */
 drop table if exists site_visitors_per_hour;
 SELECT sv.site_id
@@ -1034,7 +1078,14 @@ group by site_id;
 select count(*) from site_repeat_visits;
 select * from site_repeat_visits;
 
+/*
+To calculate average time on site, first we need to find the time on
+site for each visitor.
 
+TODO: This assumes that they are continuously on the site between
+first/last event :( Perhaps I need to look at ip address/user agent or
+other cookie info for more accurate results?
+*/
 ;with site_visits_min as (
   select distinct on (site_id, visitor_id)
   	site_id
@@ -1107,11 +1158,10 @@ on a.site_id=r.site_id;
 /*--------------------------------------------------------------------------------
 END   SITE AGGREGATES
 --------------------------------------------------------------------------------*/
-
 /********************************************************************************
 BEGIN Ex 2: SITE AGGREGATES REPORT
-********************************************************************************/
- /*
+
+
  A. Columns
     - site_id
     - average visitors per hour !(timestamp)
@@ -1119,14 +1169,12 @@ BEGIN Ex 2: SITE AGGREGATES REPORT
     - first converted visitor id
     - last converted visitor id
     - total page views
-    get counts by site_id, visitor_id, then average per site
     - avg page view per visitor id
     - total revenue
     - total conversions (distinct ec_id)
-
     - average time on site
     - total time on site
-  */
+********************************************************************************/
 
 drop table if exists ex_2_site_report_v2; 
 select sv.site_id
@@ -1163,7 +1211,6 @@ order by site_id;
 /*--------------------------------------------------------------------------------
 END   Ex 2: SITE AGGREGATES REPORT
 --------------------------------------------------------------------------------*/
-
 /********************************************************************************
 BEGIN Ex 3: FIND INTERESTING SH!*
 
