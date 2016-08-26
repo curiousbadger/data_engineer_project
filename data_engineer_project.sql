@@ -848,7 +848,8 @@ ADD CONSTRAINT pk_domain_revenue_report PRIMARY KEY (domain);
 
 select *
 from domain_revenue_report
-order by total_conversions;
+where revenue_sum is not null
+order by revenue_sum desc;
 
 -- Rinse and repeat for lvl2_domain...
 drop table if exists lvl2_domain_revenue_report;
@@ -874,7 +875,8 @@ ADD CONSTRAINT pk_lvl2_domain_revenue_report PRIMARY KEY (lvl2_domain);
 
 select *
 from lvl2_domain_revenue_report
-order by total_conversions;
+where revenue_sum is not null
+order by revenue_sum desc;
 
 
 /*
