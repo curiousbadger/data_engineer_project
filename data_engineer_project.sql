@@ -1110,6 +1110,7 @@ TODO: This assumes that they are continuously on the site between
 first/last event :( Perhaps I need to look at ip address/user agent or
 other cookie info for more accurate results?
 */
+drop table if exists site_visits_timespan;
 ;with site_visits_min as (
   select distinct on (site_id, visitor_id)
   	site_id
@@ -1132,6 +1133,7 @@ other cookie info for more accurate results?
 )
 , span as (
   select f.site_id
+	,f.visitor_id
 	--Let's get a fairly accurate span of hours between the first and last event
 	,(DATE_PART('day', max_ts - min_ts)*(24*60*60))
       +(DATE_PART('hour', max_ts - min_ts)*(60*60))
@@ -1297,6 +1299,139 @@ Looks like f54f7fab081c5762 got a refund? Or should I have checked for negative 
 
 "1200520581"   "df552f453239f3fe"   "0.9894"                                   "1"               "0.9894"    "999931"
 Congratulations df552f453239f3fe, you spent less than a dollar!
+*/
+
+-- "Session grouping" investigation
+select 
+	s."timestamp"
+    ,s.http_user_agent
+    ,s.http_x_forwarded_for
+    ,s.http_cookie
+from shard_clickstream_data_denorm s
+where site_id='999974'
+and visitor_id='e23d82a7173317ed'
+order by "timestamp";
+/*
+timestamp              http_user_agent                                                                                                  http_x_forwarded_for   http_cookie
+8/1/2016               Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           -
+8/1/2016 12:00:08 AM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 12:00:26 AM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 12:00:29 AM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 12:02:04 AM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:56:47 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:58:49 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:59:02 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:59:14 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:59:39 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+8/1/2016 11:59:50 PM   Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36   74.171.62.15           _acx_data=empty
+
+This was very likely 2 discreete sessions, not one contiguous :(
+
+The question is, how do we define session boundaries? We could define some 
+"idle time" such that if there is no click for that span then we split up the
+session... But that's sloppy and arbitrary, is there another field that could
+indicate it?
+
+Hmmmm, perhaps segment! You DID say to ignore it though...
+*/
+select 
+	s.visitor_id
+	,s."timestamp"
+    ,s.segment
+    ,dense_rank() over (partition by visitor_id order by s.segment asc)
+    ,s.http_x_forwarded_for
+    --,s.http_cookie
+    --,s.http_user_agent
+    --,*
+from shard_clickstream_data_denorm s
+where site_id='999974'
+and visitor_id in ('e23d82a7173317ed','c0b9e739f0d3ccf1', 'e001fc4578e1af85')
+order by visitor_id, "timestamp";
+/*
+visitor_id         timestamp              segment            dense_rank   http_x_forwarded_for
+c0b9e739f0d3ccf1   8/1/2016 12:00:02 AM   1470009661-10961   1            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:00:40 AM   1470009661-10961   1            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:00:52 AM   1470009661-10961   1            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:00:55 AM   1470009661-18647   2            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:01:00 AM   1470009661-18647   2            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:01:40 AM   1470009721-14664   3            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 12:02:02 AM   1470009781-12114   4            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:53:35 PM   1470095641-24932   5            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:56:58 PM   1470095821-2279    6            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:57:28 PM   1470095881-28246   7            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:57:54 PM   1470095881-28246   7            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:58:15 PM   1470095941-10331   8            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:58:38 PM   1470095941-10331   8            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:59:36 PM   1470096001-4375    9            108.238.185.76
+c0b9e739f0d3ccf1   8/1/2016 11:59:45 PM   1470096001-4375    9            108.238.185.76
+e001fc4578e1af85   8/1/2016               1470009601-21267   1            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:00:47 AM   1470009661-10961   2            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:02:12 AM   1470009781-12114   3            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:09:37 AM   1470010201-29558   4            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:10:28 AM   1470010261-32600   6            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:10:37 AM   1470010261-32600   6            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:10:54 AM   1470010261-10371   5            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:10:59 AM   1470010261-32600   6            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:11:56 AM   1470010321-10026   7            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:12:38 AM   1470010381-29325   8            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:13:28 AM   1470010441-8442    9            68.169.155.25
+e001fc4578e1af85   8/1/2016 12:14:53 AM   1470010501-25384   10           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:17:29 AM   1470010681-16890   11           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:20:24 AM   1470010861-32079   12           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:22:44 AM   1470010981-22750   13           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:23:18 AM   1470011041-18496   14           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:25:22 AM   1470011161-2400    15           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:25:35 AM   1470011161-2400    15           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:36:16 AM   1470011821-30882   16           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:37:54 AM   1470011881-20668   17           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:38:00 AM   1470011881-23793   18           68.169.155.25
+e001fc4578e1af85   8/1/2016 12:38:28 AM   1470011941-20604   19           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:19:22 AM    1470043201-16136   20           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:20:17 AM    1470043261-6542    21           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:21:01 AM    1470043321-13099   22           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:21:02 AM    1470043321-29400   23           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:21:13 AM    1470043321-13099   22           68.169.155.25
+e001fc4578e1af85   8/1/2016 9:21:46 AM    1470043321-13099   22           68.169.155.25
+e001fc4578e1af85   8/1/2016 2:22:47 PM    1470061381-4525    24           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:22:53 PM    1470061381-4525    24           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:24:05 PM    1470061501-21433   25           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:24:55 PM    1470061501-25937   26           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:25:49 PM    1470061561-15467   27           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:25:54 PM    1470061561-15467   27           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:31:23 PM    1470061921-3889    28           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:31:42 PM    1470061921-3889    28           68.169.176.247
+e001fc4578e1af85   8/1/2016 2:31:48 PM    1470061921-3889    28           68.169.176.247
+e001fc4578e1af85   8/1/2016 5:09:13 PM    1470071401-4770    29           68.169.176.247
+e001fc4578e1af85   8/1/2016 5:10:44 PM    1470071461-8748    31           68.169.176.247
+e001fc4578e1af85   8/1/2016 5:10:50 PM    1470071461-6903    30           68.169.176.247
+e001fc4578e1af85   8/1/2016 5:11:19 PM    1470071521-31408   32           68.169.176.247
+e001fc4578e1af85   8/1/2016 5:11:46 PM    1470071521-31408   32           68.169.176.247
+e001fc4578e1af85   8/1/2016 11:33:35 PM   1470094441-30365   33           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:38:16 PM   1470094741-30456   35           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:39:01 PM   1470094741-25788   34           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:39:10 PM   1470094801-13806   36           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:39:56 PM   1470094801-13806   36           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:40:08 PM   1470094861-7352    38           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:40:31 PM   1470094861-19826   37           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:40:37 PM   1470094861-19826   37           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:41:10 PM   1470094921-15567   39           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:42:05 PM   1470094981-28709   40           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:42:15 PM   1470094981-28709   40           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:42:30 PM   1470094981-28709   40           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:55:36 PM   1470095761-15325   41           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:57:27 PM   1470095881-28246   42           68.169.155.25
+e001fc4578e1af85   8/1/2016 11:59:42 PM   1470096001-25928   43           68.169.155.25
+e23d82a7173317ed   8/1/2016               1470009601-3017    1            74.171.62.15
+e23d82a7173317ed   8/1/2016 12:00:08 AM   1470009661-10961   2            74.171.62.15
+e23d82a7173317ed   8/1/2016 12:00:26 AM   1470009661-10961   2            74.171.62.15
+e23d82a7173317ed   8/1/2016 12:00:29 AM   1470009661-18647   3            74.171.62.15
+e23d82a7173317ed   8/1/2016 12:02:04 AM   1470009781-18011   4            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:56:47 PM   1470095821-2279    5            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:58:49 PM   1470095941-9587    6            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:59:02 PM   1470096001-4375    7            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:59:14 PM   1470096001-4375    7            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:59:39 PM   1470096001-4375    7            74.171.62.15
+e23d82a7173317ed   8/1/2016 11:59:50 PM   1470096001-4375    7            74.171.62.15
 */
 
 
